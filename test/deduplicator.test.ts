@@ -2,10 +2,13 @@
  * Tests for memory deduplicator
  */
 
-import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 import { MemoryDeduplicator } from '../src/memory/deduplicator.js';
 import type { TinmemConfig } from '../src/config.js';
 import type { Memory } from '../src/types.js';
+import type { TinmemDB } from '../src/memory/db.js';
+import type { EmbeddingService } from '../src/embeddings.js';
+import type { LLMService } from '../src/llm.js';
 
 function makeConfig(strategy: 'llm' | 'vector' | 'both' = 'llm'): TinmemConfig {
   return {
@@ -47,8 +50,30 @@ function makeMemory(overrides: Partial<Memory & { _distance: number }>): Memory 
     lastAccessedAt: Date.now() - 86400000,
     tags: ['existing'],
     metadata: {},
-    _distance: 0.1, // high similarity (distance = 1 - similarity)
+    _distance: 0.1,
     ...overrides,
+  };
+}
+
+// Helper to create typed mocks
+function makeMockDb(returnValue: Array<Memory & { _distance: number }> = []): Pick<TinmemDB, 'vectorSearch'> {
+  return {
+    vectorSearch: jest.fn<TinmemDB['vectorSearch']>().mockResolvedValue(returnValue),
+  };
+}
+
+function makeMockEmbedding(): Pick<EmbeddingService, 'embed' | 'embedBatch' | 'dimensions' | 'provider'> {
+  return {
+    embed: jest.fn<EmbeddingService['embed']>().mockResolvedValue([]),
+    embedBatch: jest.fn<EmbeddingService['embedBatch']>().mockResolvedValue([]),
+    dimensions: 1536,
+    provider: 'openai',
+  };
+}
+
+function makeMockLlm(response = '{}'): Pick<LLMService, 'complete'> {
+  return {
+    complete: jest.fn<LLMService['complete']>().mockResolvedValue(response),
   };
 }
 
@@ -57,11 +82,16 @@ describe('MemoryDeduplicator', () => {
 
   describe('with append-only categories', () => {
     it('should always CREATE for events', async () => {
-      const mockDb = { vectorSearch: jest.fn() } as never;
-      const mockEmbedding = { embed: jest.fn(), embedBatch: jest.fn(), dimensions: 1536, provider: 'openai' } as never;
-      const mockLlm = { complete: jest.fn() } as never;
+      const mockDb = makeMockDb();
+      const mockEmbedding = makeMockEmbedding();
+      const mockLlm = makeMockLlm();
 
-      const dedup = new MemoryDeduplicator(mockDb, mockEmbedding, mockLlm, makeConfig());
+      const dedup = new MemoryDeduplicator(
+        mockDb as unknown as TinmemDB,
+        mockEmbedding as unknown as EmbeddingService,
+        mockLlm as unknown as LLMService,
+        makeConfig(),
+      );
 
       const result = await dedup.deduplicate(
         {
@@ -82,11 +112,16 @@ describe('MemoryDeduplicator', () => {
     });
 
     it('should always CREATE for cases', async () => {
-      const mockDb = { vectorSearch: jest.fn() } as never;
-      const mockEmbedding = {} as never;
-      const mockLlm = { complete: jest.fn() } as never;
+      const mockDb = makeMockDb();
+      const mockEmbedding = makeMockEmbedding();
+      const mockLlm = makeMockLlm();
 
-      const dedup = new MemoryDeduplicator(mockDb, mockEmbedding, mockLlm, makeConfig());
+      const dedup = new MemoryDeduplicator(
+        mockDb as unknown as TinmemDB,
+        mockEmbedding as unknown as EmbeddingService,
+        mockLlm as unknown as LLMService,
+        makeConfig(),
+      );
 
       const result = await dedup.deduplicate(
         {
@@ -102,18 +137,22 @@ describe('MemoryDeduplicator', () => {
       );
 
       expect(result.decision).toBe('CREATE');
+      expect(mockDb.vectorSearch).not.toHaveBeenCalled();
     });
   });
 
   describe('with no similar memories', () => {
     it('should CREATE when no candidates found', async () => {
-      const mockDb = {
-        vectorSearch: jest.fn<() => Promise<Array<Memory & { _distance: number }>>>().mockResolvedValue([]),
-      } as never;
-      const mockEmbedding = {} as never;
-      const mockLlm = { complete: jest.fn() } as never;
+      const mockDb = makeMockDb([]); // returns empty
+      const mockEmbedding = makeMockEmbedding();
+      const mockLlm = makeMockLlm();
 
-      const dedup = new MemoryDeduplicator(mockDb, mockEmbedding, mockLlm, makeConfig());
+      const dedup = new MemoryDeduplicator(
+        mockDb as unknown as TinmemDB,
+        mockEmbedding as unknown as EmbeddingService,
+        mockLlm as unknown as LLMService,
+        makeConfig(),
+      );
 
       const result = await dedup.deduplicate(
         {
@@ -136,13 +175,16 @@ describe('MemoryDeduplicator', () => {
   describe('with vector strategy', () => {
     it('should auto-MERGE when similarity is above threshold', async () => {
       const similar = [makeMemory({ _distance: 0.1 })]; // 0.9 similarity
-      const mockDb = {
-        vectorSearch: jest.fn<() => Promise<typeof similar>>().mockResolvedValue(similar),
-      } as never;
-      const mockEmbedding = {} as never;
-      const mockLlm = { complete: jest.fn() } as never;
+      const mockDb = makeMockDb(similar);
+      const mockEmbedding = makeMockEmbedding();
+      const mockLlm = makeMockLlm();
 
-      const dedup = new MemoryDeduplicator(mockDb, mockEmbedding, mockLlm, makeConfig('vector'));
+      const dedup = new MemoryDeduplicator(
+        mockDb as unknown as TinmemDB,
+        mockEmbedding as unknown as EmbeddingService,
+        mockLlm as unknown as LLMService,
+        makeConfig('vector'),
+      );
 
       const result = await dedup.deduplicate(
         {
@@ -166,17 +208,16 @@ describe('MemoryDeduplicator', () => {
   describe('with LLM strategy', () => {
     it('should call LLM for CREATE decision', async () => {
       const similar = [makeMemory({ _distance: 0.1 })];
-      const mockDb = {
-        vectorSearch: jest.fn<() => Promise<typeof similar>>().mockResolvedValue(similar),
-      } as never;
-      const mockEmbedding = {} as never;
-      const mockLlm = {
-        complete: jest.fn<() => Promise<string>>().mockResolvedValue(
-          JSON.stringify({ decision: 'CREATE', reason: 'Different topic' })
-        ),
-      } as never;
+      const mockDb = makeMockDb(similar);
+      const mockEmbedding = makeMockEmbedding();
+      const mockLlm = makeMockLlm(JSON.stringify({ decision: 'CREATE', reason: 'Different topic' }));
 
-      const dedup = new MemoryDeduplicator(mockDb, mockEmbedding, mockLlm, makeConfig('llm'));
+      const dedup = new MemoryDeduplicator(
+        mockDb as unknown as TinmemDB,
+        mockEmbedding as unknown as EmbeddingService,
+        mockLlm as unknown as LLMService,
+        makeConfig('llm'),
+      );
 
       const result = await dedup.deduplicate(
         {
@@ -197,25 +238,24 @@ describe('MemoryDeduplicator', () => {
 
     it('should call LLM for MERGE decision with merged content', async () => {
       const similar = [makeMemory({ _distance: 0.1 })];
-      const mockDb = {
-        vectorSearch: jest.fn<() => Promise<typeof similar>>().mockResolvedValue(similar),
-      } as never;
-      const mockEmbedding = {} as never;
-      const mockLlm = {
-        complete: jest.fn<() => Promise<string>>().mockResolvedValue(
-          JSON.stringify({
-            decision: 'MERGE',
-            targetId: 'existing-id',
-            mergedHeadline: 'Merged headline',
-            mergedSummary: 'Merged summary',
-            mergedContent: 'Merged full content',
-            mergedTags: ['merged', 'tag'],
-            reason: 'Same topic, merging',
-          })
-        ),
-      } as never;
+      const mockDb = makeMockDb(similar);
+      const mockEmbedding = makeMockEmbedding();
+      const mockLlm = makeMockLlm(JSON.stringify({
+        decision: 'MERGE',
+        targetId: 'existing-id',
+        mergedHeadline: 'Merged headline',
+        mergedSummary: 'Merged summary',
+        mergedContent: 'Merged full content',
+        mergedTags: ['merged', 'tag'],
+        reason: 'Same topic, merging',
+      }));
 
-      const dedup = new MemoryDeduplicator(mockDb, mockEmbedding, mockLlm, makeConfig('llm'));
+      const dedup = new MemoryDeduplicator(
+        mockDb as unknown as TinmemDB,
+        mockEmbedding as unknown as EmbeddingService,
+        mockLlm as unknown as LLMService,
+        makeConfig('llm'),
+      );
 
       const result = await dedup.deduplicate(
         {
@@ -238,15 +278,18 @@ describe('MemoryDeduplicator', () => {
 
     it('should handle LLM errors by defaulting to CREATE', async () => {
       const similar = [makeMemory({ _distance: 0.1 })];
-      const mockDb = {
-        vectorSearch: jest.fn<() => Promise<typeof similar>>().mockResolvedValue(similar),
-      } as never;
-      const mockEmbedding = {} as never;
+      const mockDb = makeMockDb(similar);
+      const mockEmbedding = makeMockEmbedding();
       const mockLlm = {
-        complete: jest.fn<() => Promise<string>>().mockRejectedValue(new Error('LLM Error')),
-      } as never;
+        complete: jest.fn<LLMService['complete']>().mockRejectedValue(new Error('LLM Error')),
+      };
 
-      const dedup = new MemoryDeduplicator(mockDb, mockEmbedding, mockLlm, makeConfig('llm'));
+      const dedup = new MemoryDeduplicator(
+        mockDb as unknown as TinmemDB,
+        mockEmbedding as unknown as EmbeddingService,
+        mockLlm as unknown as LLMService,
+        makeConfig('llm'),
+      );
 
       const result = await dedup.deduplicate(
         {

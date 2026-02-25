@@ -23,7 +23,7 @@ const BASE_CONFIG = {
     hybrid: true,
     candidateMultiplier: 3,
   },
-} as Parameters<typeof MemoryScorer>[0];
+} as ConstructorParameters<typeof MemoryScorer>[0];
 
 function makeMemory(overrides: Partial<Memory & { vectorScore: number; bm25Score: number }>): Memory & { vectorScore: number; bm25Score: number } {
   const now = Date.now();

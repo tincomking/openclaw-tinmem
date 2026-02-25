@@ -170,6 +170,7 @@ program
     }
 
     console.log(chalk.bold('\nBy Category:'));
+    const { table: tableRenderer } = await import('table');
     const catData = [
       [chalk.bold('Category'), chalk.bold('Count')],
       ...Object.entries(stats.byCategory).map(([cat, count]) => [
@@ -177,8 +178,7 @@ program
         String(count),
       ]),
     ];
-    const { table } = await import('table');
-    console.log(table(catData));
+    console.log(tableRenderer(catData));
 
     if (Object.keys(stats.byScope).length > 0) {
       console.log(chalk.bold('By Scope:'));
@@ -189,7 +189,7 @@ program
           String(count),
         ]),
       ];
-      console.log(table(scopeData));
+      console.log(tableRenderer(scopeData));
     }
   });
 

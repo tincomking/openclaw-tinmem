@@ -4,9 +4,8 @@
  */
 
 import * as lancedb from '@lancedb/lancedb';
-import { Schema, Field, Float32, Utf8, Float64, Int64, List } from 'apache-arrow';
+import { Schema, Field, Float32, Utf8, Float64, FixedSizeList } from 'apache-arrow';
 import { mkdirSync } from 'fs';
-import { dirname } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
 import type { Memory, MemoryRecord, MemoryScope, MemoryCategory, MemoryStats } from '../types.js';
@@ -30,7 +29,7 @@ function buildArrowSchema(dimensions: number): Schema {
     new Field('lastAccessedAt', new Float64(), false),
     new Field('tags', new Utf8(), false),        // JSON serialized
     new Field('metadata', new Utf8(), false),    // JSON serialized
-    new Field('vector', new List(new Field('item', new Float32())), false),
+    new Field('vector', new FixedSizeList(dimensions, new Field('item', new Float32())), false),
   ]);
 }
 
@@ -40,6 +39,7 @@ export class TinmemDB {
   private db!: lancedb.Connection;
   private table!: lancedb.Table;
   private initialized = false;
+  private ftsReady = false;
 
   constructor(
     private dbPath: string,
@@ -55,29 +55,36 @@ export class TinmemDB {
     const tables = await this.db.tableNames();
     if (tables.includes(TABLE_NAME)) {
       this.table = await this.db.openTable(TABLE_NAME);
+      // For existing table: FTS indexes should already be present
+      this.ftsReady = true;
     } else {
       this.table = await this.db.createEmptyTable(
         TABLE_NAME,
         buildArrowSchema(this.dimensions),
         { mode: 'create' }
       );
-
-      // Create indices for fast search
-      await this.table.createIndex('id');
-      await this.table.createIndex('scope');
-      await this.table.createIndex('category');
-    }
-
-    // Enable full-text search on content, summary, headline, tags
-    try {
-      await this.table.createFtsIndex(['content', 'summary', 'headline', 'tags'], {
-        withPosition: true,
-      });
-    } catch {
-      // FTS index may already exist
+      // FTS indexes must be created AFTER data is inserted (not on empty table)
+      // See ensureFtsIndexes() called from insert()/bulkInsert()
+      this.ftsReady = false;
     }
 
     this.initialized = true;
+  }
+
+  /**
+   * Create or update FTS indexes. Must be called after data is present in the table.
+   * FTS indexes created on empty tables return incorrect (all-matching) results.
+   */
+  private async ensureFtsIndexes(): Promise<void> {
+    if (this.ftsReady) return;
+    for (const col of ['content', 'summary', 'headline', 'tags']) {
+      try {
+        await this.table.createIndex(col, { config: lancedb.Index.fts() });
+      } catch {
+        // Index already exists or table is empty – both are OK
+      }
+    }
+    this.ftsReady = true;
   }
 
   private ensureInit(): void {
@@ -100,6 +107,7 @@ export class TinmemDB {
     };
 
     await this.table.add([this.toRow(record)]);
+    await this.ensureFtsIndexes();
     return this.fromRow(this.toRow(record));
   }
 
@@ -186,6 +194,7 @@ export class TinmemDB {
 
     let query = this.table
       .vectorSearch(queryVector)
+      .column('vector')
       .limit(options.limit * 3) // over-fetch for filtering
       .distanceType('cosine');
 
@@ -365,6 +374,7 @@ export class TinmemDB {
     this.ensureInit();
     if (records.length === 0) return;
     await this.table.add(records.map(r => this.toRow(r)));
+    await this.ensureFtsIndexes();
   }
 
   async getAllForExport(scope?: MemoryScope): Promise<Memory[]> {

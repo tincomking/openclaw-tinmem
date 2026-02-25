@@ -176,7 +176,7 @@ export class MemoryTools {
         importance: m.importance,
         tags: m.tags,
         score: m.score,
-        createdAt: new Date(m.createdAt).toISOString(),
+        createdAt: m.createdAt,
       })),
       totalFound: result.totalFound,
       timingMs: result.timingMs,
