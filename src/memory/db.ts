@@ -4,33 +4,36 @@
  */
 
 import * as lancedb from '@lancedb/lancedb';
-import { Schema, Field, Float32, Utf8, Float64, FixedSizeList } from 'apache-arrow';
 import { mkdirSync } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
 import type { Memory, MemoryRecord, MemoryScope, MemoryCategory, MemoryStats } from '../types.js';
 
 const TABLE_NAME = 'memories';
+const INIT_SENTINEL_ID = '__tinmem_init__';
 
-// ─── Arrow Schema ────────────────────────────────────────────────────────────
+// ─── Dummy Row ───────────────────────────────────────────────────────────────
+// Used to create the table with the correct schema via db.createTable([row]).
+// This avoids createEmptyTable(schema) which has a LanceDB 0.14 bug with
+// FixedSizeList when apache-arrow schema objects are passed directly.
 
-function buildArrowSchema(dimensions: number): Schema {
-  return new Schema([
-    new Field('id', new Utf8(), false),
-    new Field('headline', new Utf8(), false),
-    new Field('summary', new Utf8(), false),
-    new Field('content', new Utf8(), false),
-    new Field('category', new Utf8(), false),
-    new Field('scope', new Utf8(), false),
-    new Field('importance', new Float32(), false),
-    new Field('createdAt', new Float64(), false),
-    new Field('updatedAt', new Float64(), false),
-    new Field('accessCount', new Float64(), false),
-    new Field('lastAccessedAt', new Float64(), false),
-    new Field('tags', new Utf8(), false),        // JSON serialized
-    new Field('metadata', new Utf8(), false),    // JSON serialized
-    new Field('vector', new FixedSizeList(dimensions, new Field('item', new Float32())), false),
-  ]);
+function buildDummyRow(dimensions: number): Record<string, unknown> {
+  return {
+    id: INIT_SENTINEL_ID,
+    headline: '',
+    summary: '',
+    content: '',
+    category: 'profile',
+    scope: 'global',
+    importance: 0.0,
+    createdAt: 0.0,
+    updatedAt: 0.0,
+    accessCount: 0.0,
+    lastAccessedAt: 0.0,
+    tags: '[]',
+    metadata: '{}',
+    vector: Array.from({ length: dimensions }, () => 0),
+  };
 }
 
 // ─── TinmemDB ────────────────────────────────────────────────────────────────
@@ -58,11 +61,16 @@ export class TinmemDB {
       // For existing table: FTS indexes should already be present
       this.ftsReady = true;
     } else {
-      this.table = await this.db.createEmptyTable(
+      // Use dummy-row technique to avoid LanceDB 0.14 bug with createEmptyTable+FixedSizeList.
+      // LanceDB's sanitize.js checks `listSize in typeLike` and throws when passed external
+      // Arrow schema objects in some environments. Inserting a dummy row lets LanceDB infer
+      // the schema from JS data instead, then we delete the sentinel row.
+      this.table = await this.db.createTable(
         TABLE_NAME,
-        buildArrowSchema(this.dimensions),
+        [buildDummyRow(this.dimensions)],
         { mode: 'create' }
       );
+      await this.table.delete(`id = '${INIT_SENTINEL_ID}'`);
       // FTS indexes must be created AFTER data is inserted (not on empty table)
       // See ensureFtsIndexes() called from insert()/bulkInsert()
       this.ftsReady = false;
