@@ -312,23 +312,176 @@ program
 
 // ─── init ────────────────────────────────────────────────────────────────────
 
+async function prompt(rl: import('readline').Interface, question: string): Promise<string> {
+  return new Promise<string>(resolve => { rl.question(question, resolve); });
+}
+
 program
   .command('init')
-  .description('Generate a sample configuration file')
+  .description('Initialize configuration with interactive setup')
   .option('-o, --output <path>', 'Output path', 'tinmem.config.json')
   .option('-f, --force', 'Overwrite if exists')
+  .option('--non-interactive', 'Generate sample config without prompts')
   .action(async (opts) => {
     const { writeFileSync, existsSync } = await import('fs');
     const { generateSampleConfig } = await import('../config.js');
+    const { homedir } = await import('os');
 
     if (existsSync(opts.output) && !opts.force) {
       console.log(chalk.yellow(`Config file ${opts.output} already exists. Use --force to overwrite.`));
       return;
     }
 
-    writeFileSync(opts.output, generateSampleConfig(), 'utf-8');
-    console.log(chalk.green(`✓ Created ${opts.output}`));
-    console.log(chalk.gray('Edit the file to add your API keys and preferences.'));
+    // Non-interactive mode: generate sample template
+    if (opts.nonInteractive) {
+      writeFileSync(opts.output, generateSampleConfig(), 'utf-8');
+      console.log(chalk.green(`✓ Created ${opts.output}`));
+      console.log(chalk.gray('Edit the file to add your API keys and preferences.'));
+      return;
+    }
+
+    // Interactive setup
+    const { createInterface } = await import('readline');
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+    console.log(chalk.bold('\n🧠 openclaw-tinmem Setup\n'));
+
+    // 1. Embedding provider
+    console.log(chalk.bold('Embedding Provider:'));
+    console.log('  1) OpenAI    (text-embedding-3-small, recommended)');
+    console.log('  2) Jina      (jina-embeddings-v3)');
+    console.log('  3) Gemini    (text-embedding-004)');
+    console.log('  4) Ollama    (nomic-embed-text, local, no API key needed)');
+    const providerChoice = await prompt(rl, chalk.cyan('Choose [1-4, default 1]: '));
+
+    const providerMap: Record<string, { provider: string; model: string; dimensions: number }> = {
+      '1': { provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536 },
+      '2': { provider: 'jina', model: 'jina-embeddings-v3', dimensions: 1024 },
+      '3': { provider: 'gemini', model: 'text-embedding-004', dimensions: 768 },
+      '4': { provider: 'ollama', model: 'nomic-embed-text', dimensions: 768 },
+    };
+    const selected = providerMap[providerChoice.trim()] ?? providerMap['1'];
+
+    // 2. Embedding API key
+    let embeddingApiKey = '';
+    if (selected.provider !== 'ollama') {
+      const envKey = selected.provider === 'openai' ? process.env.OPENAI_API_KEY
+        : selected.provider === 'jina' ? process.env.JINA_API_KEY
+        : process.env.GEMINI_API_KEY;
+
+      if (envKey) {
+        const useEnv = await prompt(rl, chalk.cyan(
+          `Found ${selected.provider.toUpperCase()} API key in environment. Use it? [Y/n]: `
+        ));
+        if (!useEnv.trim() || useEnv.trim().toLowerCase() === 'y') {
+          embeddingApiKey = `\${${selected.provider === 'openai' ? 'OPENAI_API_KEY' : selected.provider === 'jina' ? 'JINA_API_KEY' : 'GEMINI_API_KEY'}}`;
+        }
+      }
+
+      if (!embeddingApiKey) {
+        embeddingApiKey = await prompt(rl, chalk.cyan(`${selected.provider.toUpperCase()} Embedding API Key: `));
+        if (!embeddingApiKey.trim()) {
+          console.log(chalk.red('API key is required. Using placeholder.'));
+          embeddingApiKey = `YOUR_${selected.provider.toUpperCase()}_API_KEY`;
+        }
+      }
+    }
+
+    // 3. LLM API key
+    console.log(chalk.bold('\nLLM (for memory extraction & deduplication):'));
+    let llmApiKey = '';
+    if (selected.provider === 'openai' && embeddingApiKey && !embeddingApiKey.startsWith('YOUR_')) {
+      const reuse = await prompt(rl, chalk.cyan('Reuse OpenAI API key for LLM? [Y/n]: '));
+      if (!reuse.trim() || reuse.trim().toLowerCase() === 'y') {
+        llmApiKey = embeddingApiKey;
+      }
+    }
+    if (!llmApiKey) {
+      const envLlmKey = process.env.OPENAI_API_KEY;
+      if (envLlmKey) {
+        const useEnv = await prompt(rl, chalk.cyan('Found OPENAI_API_KEY in environment for LLM. Use it? [Y/n]: '));
+        if (!useEnv.trim() || useEnv.trim().toLowerCase() === 'y') {
+          llmApiKey = '${OPENAI_API_KEY}';
+        }
+      }
+    }
+    if (!llmApiKey) {
+      llmApiKey = await prompt(rl, chalk.cyan('LLM API Key (OpenAI-compatible): '));
+      if (!llmApiKey.trim()) {
+        llmApiKey = 'YOUR_OPENAI_API_KEY';
+      }
+    }
+
+    const llmModel = await prompt(rl, chalk.cyan('LLM model [default: gpt-4o-mini]: '));
+
+    // 4. Reranker
+    console.log(chalk.bold('\nReranker (optional, improves retrieval precision):'));
+    const enableReranker = await prompt(rl, chalk.cyan('Enable cross-encoder reranker? [y/N]: '));
+    let rerankerConfig: Record<string, string> | null = null;
+
+    if (enableReranker.trim().toLowerCase() === 'y') {
+      console.log('  1) Jina    (jina-reranker-v2-base-multilingual)');
+      console.log('  2) SiliconFlow (BAAI/bge-reranker-v2-m3)');
+      console.log('  3) Pinecone    (bge-reranker-v2-m3)');
+      const rerankerChoice = await prompt(rl, chalk.cyan('Choose [1-3, default 1]: '));
+
+      const rerankerProviders: Record<string, string> = { '1': 'jina', '2': 'siliconflow', '3': 'pinecone' };
+      const rerankerProvider = rerankerProviders[rerankerChoice.trim()] ?? 'jina';
+      const rerankerApiKey = await prompt(rl, chalk.cyan(`${rerankerProvider} Reranker API Key: `));
+
+      rerankerConfig = {
+        provider: rerankerProvider,
+        apiKey: rerankerApiKey.trim() || `YOUR_${rerankerProvider.toUpperCase()}_API_KEY`,
+      };
+    }
+
+    rl.close();
+
+    // Build config
+    const config: Record<string, unknown> = {
+      dbPath: `${homedir()}/.openclaw/tinmem/lancedb`,
+      defaultScope: 'global',
+      embedding: {
+        provider: selected.provider,
+        ...(selected.provider !== 'ollama' ? { apiKey: embeddingApiKey.trim() } : {}),
+        model: selected.model,
+      },
+      llm: {
+        apiKey: llmApiKey.trim(),
+        model: llmModel.trim() || 'gpt-4o-mini',
+      },
+      deduplication: {
+        strategy: 'llm',
+        similarityThreshold: 0.85,
+      },
+      retrieval: {
+        limit: 10,
+        minScore: 0.3,
+        hybrid: true,
+        ...(rerankerConfig ? { reranker: rerankerConfig } : {}),
+      },
+      scoring: {
+        vectorWeight: 0.4,
+        bm25Weight: 0.3,
+        rerankerWeight: 0.3,
+      },
+      autoRecall: true,
+      recallLimit: 8,
+      recallMinScore: 0.4,
+      debug: false,
+    };
+
+    writeFileSync(opts.output, JSON.stringify(config, null, 2), 'utf-8');
+
+    console.log(chalk.green(`\n✓ Created ${opts.output}`));
+
+    // Show next steps
+    console.log(chalk.bold('\nNext steps:'));
+    if (embeddingApiKey.startsWith('YOUR_') || llmApiKey.startsWith('YOUR_')) {
+      console.log(chalk.yellow('  1. Edit the config file to fill in your API keys'));
+    }
+    console.log(chalk.gray(`  ${embeddingApiKey.startsWith('YOUR_') ? '2' : '1'}. Test with: tinmem stats`));
+    console.log(chalk.gray('  For OpenClaw integration, see: https://github.com/tincomking/openclaw-tinmem#openclaw-integration'));
   });
 
 program.parse();
