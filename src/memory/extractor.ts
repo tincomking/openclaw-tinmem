@@ -11,7 +11,6 @@ import {
   buildExtractionPrompt,
   buildSessionSummaryPrompt,
   isNoise,
-  NOISE_PATTERNS,
 } from '../prompts.js';
 import type { TinmemConfig } from '../config.js';
 

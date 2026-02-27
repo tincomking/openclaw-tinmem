@@ -99,7 +99,6 @@ program
   .option('--json', 'Output as JSON')
   .action(async (query: string, opts) => {
     const ora = (await import('ora')).default;
-    const { table } = await import('table');
     const config = loadConfig((program.opts() as { config?: string }).config);
     const manager = await getMemoryManager(config);
 
@@ -147,7 +146,6 @@ program
   .description('Show memory statistics')
   .option('--json', 'Output as JSON')
   .action(async (opts) => {
-    const { table } = await import('table');
     const config = loadConfig((program.opts() as { config?: string }).config);
     const manager = await getMemoryManager(config);
 

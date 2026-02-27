@@ -155,6 +155,19 @@ ${candidatesText}
 Determine whether to CREATE, MERGE (with which candidate), or SKIP the new memory.`;
 }
 
+// ─── Context Injection Safety ─────────────────────────────────────────────────
+
+/**
+ * Neutralize XML-style tags in stored memory text to prevent prompt boundary
+ * injection. Only matches `<` followed by optional `/` and a letter (real tag
+ * syntax). `</agent-experience>` becomes `< /agent-experience>`, but `5 < 10`
+ * is left unchanged.
+ * Reference: epro-memory sanitizeForContext pattern.
+ */
+export function sanitizeForContext(text: string): string {
+  return text.replace(/<(\/?)([a-zA-Z])/g, '< $1$2');
+}
+
 // ─── Context Injection Prompt ─────────────────────────────────────────────────
 
 export function buildContextInjection(
@@ -185,11 +198,11 @@ export function buildContextInjection(
     sections.push(`\n### ${categoryLabels[cat]}`);
     for (const m of mems) {
       if (level === 'L0') {
-        sections.push(`- ${m.headline}`);
+        sections.push(`- ${sanitizeForContext(m.headline)}`);
       } else if (level === 'L1') {
-        sections.push(`- ${m.summary}`);
+        sections.push(`- ${sanitizeForContext(m.summary)}`);
       } else {
-        sections.push(`- ${m.content}`);
+        sections.push(`- ${sanitizeForContext(m.content)}`);
       }
     }
   }

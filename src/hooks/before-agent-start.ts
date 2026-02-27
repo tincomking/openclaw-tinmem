@@ -6,6 +6,7 @@
 import type { TinmemConfig } from '../config.js';
 import type { BeforeAgentStartPayload } from '../types.js';
 import { getMemoryManager } from '../memory/manager.js';
+import { buildContextInjection } from '../prompts.js';
 
 export interface BeforeAgentStartResult {
   /** Memory context to inject into the system prompt */
@@ -42,12 +43,9 @@ export async function handleBeforeAgentStart(
       return { contextInjection: '', memoriesFound: 0, memoryIds: [] };
     }
 
-    const contextInjection = await manager.buildContext(payload.userMessage, {
-      scope: scopes,
-      limit: config.recallLimit,
-      minScore: config.recallMinScore,
-      level: 'L1',
-    });
+    // Reuse recall results directly instead of calling buildContext which
+    // would perform the entire retrieval pipeline a second time.
+    const contextInjection = buildContextInjection(result.memories, 'L1');
 
     if (config.debug) {
       console.log(`[tinmem] Injecting ${result.memories.length} memories for session ${payload.sessionId}`);

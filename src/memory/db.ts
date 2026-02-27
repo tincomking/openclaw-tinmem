@@ -8,6 +8,7 @@ import { mkdirSync } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
 import type { Memory, MemoryRecord, MemoryScope, MemoryCategory, MemoryStats } from '../types.js';
+import { assertUuid, assertScope, assertCategory, escapeSqlLiteral } from './sql-safety.js';
 
 const TABLE_NAME = 'memories';
 const INIT_SENTINEL_ID = '__tinmem_init__';
@@ -43,6 +44,24 @@ export class TinmemDB {
   private table!: lancedb.Table;
   private initialized = false;
   private ftsReady = false;
+  private writeLock: Promise<void> = Promise.resolve();
+
+  /**
+   * Serialize all write operations to prevent read-modify-write race conditions.
+   * Uses a Promise chain: each write waits for the previous one to complete.
+   * Reference: epro-memory db.ts withWriteLock pattern.
+   */
+  private async withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.writeLock;
+    let resolve!: () => void;
+    this.writeLock = new Promise<void>((r) => { resolve = r; });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      resolve();
+    }
+  }
 
   constructor(
     private dbPath: string,
@@ -114,58 +133,85 @@ export class TinmemDB {
       lastAccessedAt: now,
     };
 
-    await this.table.add([this.toRow(record)]);
-    await this.ensureFtsIndexes();
-    return this.fromRow(this.toRow(record));
+    return this.withWriteLock(async () => {
+      await this.table.add([this.toRow(record)]);
+      await this.ensureFtsIndexes();
+      return this.fromRow(this.toRow(record));
+    });
   }
 
   async update(id: string, updates: Partial<Pick<Memory, 'headline' | 'summary' | 'content' | 'importance' | 'tags' | 'metadata'>> & { vector?: number[] }): Promise<Memory | null> {
     this.ensureInit();
+    assertUuid(id);
 
-    const existing = await this.getById(id);
-    if (!existing) return null;
+    return this.withWriteLock(async () => {
+      const existing = await this.getById(id);
+      if (!existing) return null;
 
-    const updated: MemoryRecord = {
-      ...existing,
-      ...updates,
-      vector: updates.vector ?? (existing as MemoryRecord).vector ?? [],
-      updatedAt: Date.now(),
-    };
+      const updated: MemoryRecord = {
+        ...existing,
+        ...updates,
+        vector: updates.vector ?? (existing as MemoryRecord).vector ?? [],
+        updatedAt: Date.now(),
+      };
 
-    await this.table.delete(`id = '${id}'`);
-    await this.table.add([this.toRow(updated)]);
+      // Save original for rollback in case add() fails
+      const rollbackRow = this.toRow(existing as MemoryRecord);
 
-    return this.fromRow(this.toRow(updated));
+      await this.table.delete(`id = '${escapeSqlLiteral(id)}'`);
+      try {
+        await this.table.add([this.toRow(updated)]);
+      } catch (err) {
+        // Rollback: restore original record
+        await this.table.add([rollbackRow]);
+        throw err;
+      }
+
+      return this.fromRow(this.toRow(updated));
+    });
   }
 
   async delete(id: string): Promise<boolean> {
     this.ensureInit();
-    const existing = await this.getById(id);
-    if (!existing) return false;
-    await this.table.delete(`id = '${id}'`);
-    return true;
+    assertUuid(id);
+
+    return this.withWriteLock(async () => {
+      const existing = await this.getById(id);
+      if (!existing) return false;
+      await this.table.delete(`id = '${escapeSqlLiteral(id)}'`);
+      return true;
+    });
   }
 
   async deleteMany(ids: string[]): Promise<number> {
     this.ensureInit();
     if (ids.length === 0) return 0;
-    const idList = ids.map(id => `'${id}'`).join(', ');
-    await this.table.delete(`id IN (${idList})`);
-    return ids.length;
+    for (const id of ids) assertUuid(id);
+
+    return this.withWriteLock(async () => {
+      const idList = ids.map(id => `'${escapeSqlLiteral(id)}'`).join(', ');
+      await this.table.delete(`id IN (${idList})`);
+      return ids.length;
+    });
   }
 
   async deleteByScope(scope: MemoryScope): Promise<number> {
     this.ensureInit();
-    const before = await this.countByScope(scope);
-    await this.table.delete(`scope = '${scope}'`);
-    return before;
+    assertScope(scope);
+
+    return this.withWriteLock(async () => {
+      const before = await this.countByScope(scope);
+      await this.table.delete(`scope = '${escapeSqlLiteral(scope)}'`);
+      return before;
+    });
   }
 
   async getById(id: string): Promise<Memory | null> {
     this.ensureInit();
+    assertUuid(id);
     const results = await this.table
       .query()
-      .where(`id = '${id}'`)
+      .where(`id = '${escapeSqlLiteral(id)}'`)
       .limit(1)
       .toArray();
 
@@ -174,17 +220,28 @@ export class TinmemDB {
 
   async incrementAccessCount(id: string): Promise<void> {
     this.ensureInit();
-    const existing = await this.getById(id);
-    if (!existing) return;
+    assertUuid(id);
 
-    await this.table.delete(`id = '${id}'`);
-    const updated = {
-      ...existing,
-      vector: (existing as MemoryRecord).vector ?? [],
-      accessCount: existing.accessCount + 1,
-      lastAccessedAt: Date.now(),
-    };
-    await this.table.add([this.toRow(updated)]);
+    await this.withWriteLock(async () => {
+      const existing = await this.getById(id);
+      if (!existing) return;
+
+      const rollbackRow = this.toRow(existing as MemoryRecord);
+
+      await this.table.delete(`id = '${escapeSqlLiteral(id)}'`);
+      const updated = {
+        ...existing,
+        vector: (existing as MemoryRecord).vector ?? [],
+        accessCount: existing.accessCount + 1,
+        lastAccessedAt: Date.now(),
+      };
+      try {
+        await this.table.add([this.toRow(updated)]);
+      } catch (err) {
+        await this.table.add([rollbackRow]);
+        throw err;
+      }
+    });
   }
 
   // ─── Vector Search ───────────────────────────────────────────────────────
@@ -210,12 +267,14 @@ export class TinmemDB {
 
     if (options.scope) {
       const scopes = Array.isArray(options.scope) ? options.scope : [options.scope];
-      const scopeFilter = scopes.map(s => `scope = '${s}'`).join(' OR ');
+      for (const s of scopes) assertScope(s);
+      const scopeFilter = scopes.map(s => `scope = '${escapeSqlLiteral(s)}'`).join(' OR ');
       filters.push(`(${scopeFilter})`);
     }
 
     if (options.categories && options.categories.length > 0) {
-      const catFilter = options.categories.map(c => `category = '${c}'`).join(' OR ');
+      for (const c of options.categories) assertCategory(c);
+      const catFilter = options.categories.map(c => `category = '${escapeSqlLiteral(c)}'`).join(' OR ');
       filters.push(`(${catFilter})`);
     }
 
@@ -254,12 +313,14 @@ export class TinmemDB {
 
       if (options.scope) {
         const scopes = Array.isArray(options.scope) ? options.scope : [options.scope];
-        const scopeFilter = scopes.map(s => `scope = '${s}'`).join(' OR ');
+        for (const s of scopes) assertScope(s);
+        const scopeFilter = scopes.map(s => `scope = '${escapeSqlLiteral(s)}'`).join(' OR ');
         filters.push(`(${scopeFilter})`);
       }
 
       if (options.categories && options.categories.length > 0) {
-        const catFilter = options.categories.map(c => `category = '${c}'`).join(' OR ');
+        for (const c of options.categories) assertCategory(c);
+        const catFilter = options.categories.map(c => `category = '${escapeSqlLiteral(c)}'`).join(' OR ');
         filters.push(`(${catFilter})`);
       }
 
@@ -299,12 +360,14 @@ export class TinmemDB {
 
     if (options.scope) {
       const scopes = Array.isArray(options.scope) ? options.scope : [options.scope];
-      const scopeFilter = scopes.map(s => `scope = '${s}'`).join(' OR ');
+      for (const s of scopes) assertScope(s);
+      const scopeFilter = scopes.map(s => `scope = '${escapeSqlLiteral(s)}'`).join(' OR ');
       filters.push(`(${scopeFilter})`);
     }
 
     if (options.categories && options.categories.length > 0) {
-      const catFilter = options.categories.map(c => `category = '${c}'`).join(' OR ');
+      for (const c of options.categories) assertCategory(c);
+      const catFilter = options.categories.map(c => `category = '${escapeSqlLiteral(c)}'`).join(' OR ');
       filters.push(`(${catFilter})`);
     }
 
@@ -340,7 +403,8 @@ export class TinmemDB {
 
   async countByScope(scope: MemoryScope): Promise<number> {
     this.ensureInit();
-    const results = await this.table.query().where(`scope = '${scope}'`).toArray();
+    assertScope(scope);
+    const results = await this.table.query().where(`scope = '${escapeSqlLiteral(scope)}'`).toArray();
     return results.length;
   }
 
@@ -349,8 +413,10 @@ export class TinmemDB {
   async getStats(): Promise<MemoryStats> {
     this.ensureInit();
 
-    const all = await this.table.query().toArray();
-    const memories = all.map(row => this.fromRow(row));
+    // Only select lightweight columns — avoid loading vector data into memory
+    const rows = await this.table.query()
+      .select(['category', 'scope', 'importance', 'createdAt'])
+      .toArray();
 
     const byCategory = {
       profile: 0, preferences: 0, entities: 0,
@@ -359,20 +425,27 @@ export class TinmemDB {
 
     const byScope: Record<string, number> = {};
     let totalImportance = 0;
+    let oldest = Infinity;
+    let newest = 0;
 
-    for (const m of memories) {
-      byCategory[m.category] = (byCategory[m.category] ?? 0) + 1;
-      byScope[m.scope] = (byScope[m.scope] ?? 0) + 1;
-      totalImportance += m.importance;
+    for (const row of rows) {
+      const cat = row.category as MemoryCategory;
+      byCategory[cat] = (byCategory[cat] ?? 0) + 1;
+      const scope = row.scope as string;
+      byScope[scope] = (byScope[scope] ?? 0) + 1;
+      totalImportance += row.importance as number;
+      const t = row.createdAt as number;
+      if (t < oldest) oldest = t;
+      if (t > newest) newest = t;
     }
 
     return {
-      total: memories.length,
+      total: rows.length,
       byCategory,
       byScope,
-      oldestMemory: memories.length > 0 ? Math.min(...memories.map(m => m.createdAt)) : undefined,
-      newestMemory: memories.length > 0 ? Math.max(...memories.map(m => m.createdAt)) : undefined,
-      avgImportance: memories.length > 0 ? totalImportance / memories.length : 0,
+      oldestMemory: rows.length > 0 ? oldest : undefined,
+      newestMemory: rows.length > 0 ? newest : undefined,
+      avgImportance: rows.length > 0 ? totalImportance / rows.length : 0,
     };
   }
 
@@ -381,8 +454,11 @@ export class TinmemDB {
   async bulkInsert(records: MemoryRecord[]): Promise<void> {
     this.ensureInit();
     if (records.length === 0) return;
-    await this.table.add(records.map(r => this.toRow(r)));
-    await this.ensureFtsIndexes();
+
+    await this.withWriteLock(async () => {
+      await this.table.add(records.map(r => this.toRow(r)));
+      await this.ensureFtsIndexes();
+    });
   }
 
   async getAllForExport(scope?: MemoryScope): Promise<Memory[]> {

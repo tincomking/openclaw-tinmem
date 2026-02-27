@@ -9,7 +9,6 @@ import type { Memory, ExtractedMemory, DedupResult } from '../types.js';
 import { DEDUP_SYSTEM_PROMPT, buildDedupPrompt } from '../prompts.js';
 import type { TinmemDB } from './db.js';
 import type { EmbeddingService } from '../embeddings.js';
-import { cosineSimilarity } from '../embeddings.js';
 import type { TinmemConfig } from '../config.js';
 
 // Append-only categories always CREATE
@@ -18,7 +17,7 @@ const APPEND_ONLY_CATEGORIES = new Set(['events', 'cases']);
 export class MemoryDeduplicator {
   constructor(
     private db: TinmemDB,
-    private embedding: EmbeddingService,
+    _embedding: EmbeddingService,
     private llm: LLMService,
     private config: TinmemConfig,
   ) {}

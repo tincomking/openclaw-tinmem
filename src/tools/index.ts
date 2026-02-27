@@ -5,7 +5,7 @@
 
 import type { TinmemConfig } from '../config.js';
 import type {
-  Memory, MemoryCategory, MemoryScope,
+  Memory, MemoryScope,
   MemoryRecallInput, MemoryStoreInput, MemoryForgetInput, MemoryUpdateInput,
   RetrievalResult,
 } from '../types.js';

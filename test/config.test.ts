@@ -2,7 +2,7 @@
  * Tests for configuration schema and validation
  */
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect } from '@jest/globals';
 import { TinmemConfigSchema, generateSampleConfig } from '../src/config.js';
 
 describe('TinmemConfigSchema', () => {

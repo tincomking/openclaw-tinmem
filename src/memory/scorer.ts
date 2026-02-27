@@ -10,11 +10,9 @@ const MS_PER_DAY = 86400 * 1000;
 
 export class MemoryScorer {
   private scoringCfg: TinmemConfig['scoring'];
-  private retrievalCfg: TinmemConfig['retrieval'];
 
-  constructor(private config: TinmemConfig) {
+  constructor(config: TinmemConfig) {
     this.scoringCfg = config.scoring;
-    this.retrievalCfg = config.retrieval;
   }
 
   /**

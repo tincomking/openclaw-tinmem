@@ -6,11 +6,11 @@
 import type { TinmemConfig } from '../config.js';
 import type {
   Memory, MemoryScope, MemoryCategory, MemoryStats,
-  RetrievalOptions, RetrievalResult, ScoredMemory,
+  RetrievalOptions, RetrievalResult,
   ExtractedMemory, ExportData, ConversationTurn,
 } from '../types.js';
 import { getDB, TinmemDB } from './db.js';
-import { createEmbeddingService } from '../embeddings.js';
+import { createEmbeddingService, type EmbeddingService } from '../embeddings.js';
 import { createLLMService } from '../llm.js';
 import { createReranker } from '../reranker.js';
 import { MemoryExtractor } from './extractor.js';
@@ -19,6 +19,7 @@ import { MemoryRetriever } from './retriever.js';
 
 export class MemoryManager {
   private db!: TinmemDB;
+  private embedding!: EmbeddingService;
   private extractor!: MemoryExtractor;
   private deduplicator!: MemoryDeduplicator;
   private retriever!: MemoryRetriever;
@@ -29,14 +30,14 @@ export class MemoryManager {
   async init(): Promise<void> {
     if (this.ready) return;
 
-    const embedding = createEmbeddingService(this.config);
+    this.embedding = createEmbeddingService(this.config);
     const llm = createLLMService(this.config);
     const reranker = createReranker(this.config);
 
     this.db = await getDB(this.config.dbPath, this.config.embedding.dimensions);
     this.extractor = new MemoryExtractor(llm, this.config);
-    this.deduplicator = new MemoryDeduplicator(this.db, embedding, llm, this.config);
-    this.retriever = new MemoryRetriever(this.db, embedding, reranker, this.config);
+    this.deduplicator = new MemoryDeduplicator(this.db, this.embedding, llm, this.config);
+    this.retriever = new MemoryRetriever(this.db, this.embedding, reranker, this.config);
 
     this.ready = true;
   }
@@ -91,11 +92,9 @@ export class MemoryManager {
   ): Promise<Memory[]> {
     const stored: Memory[] = [];
 
-    const embedding = createEmbeddingService(this.config);
-
     for (const candidate of extracted) {
       try {
-        const vector = await embedding.embed(
+        const vector = await this.embedding.embed(
           `${candidate.headline}\n${candidate.summary}\n${candidate.content}`
         );
 
@@ -109,7 +108,7 @@ export class MemoryManager {
 
         if (dedupResult.decision === 'MERGE' && dedupResult.targetId) {
           const mergedVector = dedupResult.mergedContent
-            ? await embedding.embed(
+            ? await this.embedding.embed(
                 `${dedupResult.mergedHeadline ?? candidate.headline}\n${dedupResult.mergedSummary ?? candidate.summary}\n${dedupResult.mergedContent}`
               )
             : vector;
@@ -169,8 +168,7 @@ export class MemoryManager {
 
     if (options.skipExtraction) {
       // Direct storage without LLM extraction
-      const embedding = createEmbeddingService(this.config);
-      const vector = await embedding.embed(content);
+      const vector = await this.embedding.embed(content);
 
       const memory = await this.db.insert({
         headline: content.slice(0, 100),
@@ -240,12 +238,11 @@ export class MemoryManager {
       const existing = await this.db.getById(id);
       if (!existing) return null;
 
-      const embedding = createEmbeddingService(this.config);
       const newHeadline = updates.headline ?? existing.headline;
       const newSummary = updates.summary ?? existing.summary;
       const newContent = updates.content ?? existing.content;
 
-      const vector = await embedding.embed(`${newHeadline}\n${newSummary}\n${newContent}`);
+      const vector = await this.embedding.embed(`${newHeadline}\n${newSummary}\n${newContent}`);
       return this.db.update(id, { ...updates, vector });
     }
 
@@ -288,7 +285,6 @@ export class MemoryManager {
   async import(data: ExportData, scope?: MemoryScope): Promise<number> {
     this.ensureReady();
 
-    const embedding = createEmbeddingService(this.config);
     const toImport = data.memories;
 
     if (toImport.length === 0) return 0;
@@ -296,7 +292,7 @@ export class MemoryManager {
     let imported = 0;
     for (const m of toImport) {
       try {
-        const vector = await embedding.embed(`${m.headline}\n${m.summary}\n${m.content}`);
+        const vector = await this.embedding.embed(`${m.headline}\n${m.summary}\n${m.content}`);
         await this.db.insert({
           ...m,
           scope: scope ?? m.scope,
@@ -319,13 +315,12 @@ export class MemoryManager {
   async reembed(scope?: MemoryScope): Promise<number> {
     this.ensureReady();
 
-    const embedding = createEmbeddingService(this.config);
     const memories = await this.db.getAllForExport(scope);
 
     let count = 0;
     for (const m of memories) {
       try {
-        const vector = await embedding.embed(`${m.headline}\n${m.summary}\n${m.content}`);
+        const vector = await this.embedding.embed(`${m.headline}\n${m.summary}\n${m.content}`);
         await this.db.update(m.id, { vector } as Parameters<typeof this.db.update>[1]);
         count++;
       } catch {
@@ -340,15 +335,23 @@ export class MemoryManager {
 // ─── Singleton ───────────────────────────────────────────────────────────────
 
 let instance: MemoryManager | null = null;
+let initPromise: Promise<MemoryManager> | null = null;
 
 export async function getMemoryManager(config: TinmemConfig): Promise<MemoryManager> {
-  if (!instance) {
-    instance = new MemoryManager(config);
-    await instance.init();
+  if (instance) return instance;
+  if (!initPromise) {
+    initPromise = (async () => {
+      const m = new MemoryManager(config);
+      await m.init();
+      instance = m;
+      initPromise = null;
+      return m;
+    })();
   }
-  return instance;
+  return initPromise;
 }
 
 export function resetMemoryManager(): void {
   instance = null;
+  initPromise = null;
 }

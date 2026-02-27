@@ -3,7 +3,7 @@
  * Vector search + BM25 full-text search + cross-encoder reranking
  */
 
-import type { Memory, ScoredMemory, RetrievalOptions, RetrievalResult } from '../types.js';
+import type { Memory, RetrievalOptions, RetrievalResult } from '../types.js';
 import type { TinmemDB } from './db.js';
 import type { EmbeddingService } from '../embeddings.js';
 import type { RerankerService } from '../reranker.js';
