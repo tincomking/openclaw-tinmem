@@ -1,6 +1,6 @@
 {
   "name": "openclaw-tinmem",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A powerful memory system for OpenClaw AI assistant, combining structured categorization, hybrid retrieval, and intelligent deduplication.",
   "type": "module",
   "main": "dist/index.js",

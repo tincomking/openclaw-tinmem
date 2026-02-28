@@ -215,7 +215,7 @@ export class TinmemDB {
       .limit(1)
       .toArray();
 
-    return results.length > 0 ? this.fromRow(results[0]) : null;
+    return results?.length > 0 ? this.fromRow(results[0]) : null;
   }
 
   async incrementAccessCount(id: string): Promise<void> {
@@ -283,6 +283,7 @@ export class TinmemDB {
     }
 
     const results = await query.toArray();
+    if (!results) return [];
 
     return results
       .map(row => ({
@@ -334,6 +335,7 @@ export class TinmemDB {
       }
 
       const results = await ftsQuery.toArray();
+      if (!results) return [];
       return results.map(row => ({
         ...this.fromRow(row),
         _score: (row._relevance_score as number) ?? 0,
@@ -381,6 +383,7 @@ export class TinmemDB {
     query = query.limit(limit + (options.offset ?? 0));
 
     const results = await query.toArray();
+    if (!results) return [];
 
     let memories = results.map(row => this.fromRow(row));
 
@@ -405,7 +408,7 @@ export class TinmemDB {
     this.ensureInit();
     assertScope(scope);
     const results = await this.table.query().where(`scope = '${escapeSqlLiteral(scope)}'`).toArray();
-    return results.length;
+    return results?.length ?? 0;
   }
 
   // ─── Statistics ──────────────────────────────────────────────────────────
@@ -416,7 +419,7 @@ export class TinmemDB {
     // Only select lightweight columns — avoid loading vector data into memory
     const rows = await this.table.query()
       .select(['category', 'scope', 'importance', 'createdAt'])
-      .toArray();
+      .toArray() ?? [];
 
     const byCategory = {
       profile: 0, preferences: 0, entities: 0,
