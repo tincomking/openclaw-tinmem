@@ -104,6 +104,13 @@ export class MemoryManager {
           console.log(`[tinmem] Dedup decision: ${dedupResult.decision} - ${dedupResult.reason}`);
         }
 
+        // Append-only categories (events, cases) must never be skipped or merged —
+        // always create as new records to avoid data loss.
+        const APPEND_ONLY = new Set(['events', 'cases']);
+        if (APPEND_ONLY.has(candidate.category) && dedupResult.decision !== 'CREATE') {
+          dedupResult.decision = 'CREATE';
+        }
+
         if (dedupResult.decision === 'SKIP') continue;
 
         if (dedupResult.decision === 'MERGE' && dedupResult.targetId) {
