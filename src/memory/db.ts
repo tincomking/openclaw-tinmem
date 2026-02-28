@@ -257,32 +257,38 @@ export class TinmemDB {
   ): Promise<Array<Memory & { _distance: number }>> {
     this.ensureInit();
 
-    let query = this.table
-      .vectorSearch(queryVector)
-      .column('vector')
-      .limit(options.limit * 3) // over-fetch for filtering
-      .distanceType('cosine');
+    let results: Record<string, unknown>[];
+    try {
+      let query = this.table
+        .vectorSearch(queryVector)
+        .column('vector')
+        .limit(options.limit * 3) // over-fetch for filtering
+        .distanceType('cosine');
 
-    const filters: string[] = [];
+      const filters: string[] = [];
 
-    if (options.scope) {
-      const scopes = Array.isArray(options.scope) ? options.scope : [options.scope];
-      for (const s of scopes) assertScope(s);
-      const scopeFilter = scopes.map(s => `scope = '${escapeSqlLiteral(s)}'`).join(' OR ');
-      filters.push(`(${scopeFilter})`);
+      if (options.scope) {
+        const scopes = Array.isArray(options.scope) ? options.scope : [options.scope];
+        for (const s of scopes) assertScope(s);
+        const scopeFilter = scopes.map(s => `scope = '${escapeSqlLiteral(s)}'`).join(' OR ');
+        filters.push(`(${scopeFilter})`);
+      }
+
+      if (options.categories && options.categories.length > 0) {
+        for (const c of options.categories) assertCategory(c);
+        const catFilter = options.categories.map(c => `category = '${escapeSqlLiteral(c)}'`).join(' OR ');
+        filters.push(`(${catFilter})`);
+      }
+
+      if (filters.length > 0) {
+        query = query.where(filters.join(' AND '));
+      }
+
+      results = await query.toArray();
+    } catch {
+      // LanceDB internal error (e.g. vector index not ready on first call)
+      return [];
     }
-
-    if (options.categories && options.categories.length > 0) {
-      for (const c of options.categories) assertCategory(c);
-      const catFilter = options.categories.map(c => `category = '${escapeSqlLiteral(c)}'`).join(' OR ');
-      filters.push(`(${catFilter})`);
-    }
-
-    if (filters.length > 0) {
-      query = query.where(filters.join(' AND '));
-    }
-
-    const results = await query.toArray();
     if (!results) return [];
 
     return results
